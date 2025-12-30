@@ -1,43 +1,59 @@
-import torch
 import gradio as gr
-from torchvision import models, transforms
+import numpy as np
 from PIL import Image
 
-# class isimlerini kendi datasetine göre değiştir
-CLASS_NAMES = [
-    "buildings",
-    "forest",
-    "glacier",
-    "mountain",
-    "sea",
-    "street"
-]
+CLASSES = ["cadde", "deniz", "orman", "dag", "ic_mekan", "tarihi_yer"]
 
-# model yükleme
-model = models.resnet18(pretrained=False)
-model.fc = torch.nn.Linear(model.fc.in_features, len(CLASS_NAMES))
-model.load_state_dict(torch.load("model.pth", map_location="cpu"))
-model.eval()
+def predict(img: Image.Image):
+    # Çok hızlı "baseline" (renk + kontrast heuristik)
+    im = img.convert("RGB").resize((256, 256))
+    arr = np.asarray(im).astype(np.float32) / 255.0
 
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor()
-])
+    r, g, b = arr[...,0].mean(), arr[...,1].mean(), arr[...,2].mean()
+    bright = arr.mean()
+    contrast = arr.std()
 
-def predict(image):
-    image = transform(image).unsqueeze(0)
-    with torch.no_grad():
-        outputs = model(image)
-        _, predicted = torch.max(outputs, 1)
-    return CLASS_NAMES[predicted.item()]
+    # Basit skorlar (tam bilimsel değil ama demo için çalışır)
+    scores = {c: 0.0 for c in CLASSES}
 
-interface = gr.Interface(
+    # Deniz: mavi baskın
+    scores["deniz"] += (b - (r+g)/2) * 3.0
+
+    # Orman: yeşil baskın
+    scores["orman"] += (g - (r+b)/2) * 3.0
+
+    # İç mekan: daha düşük mavi/yeşil, orta parlaklık + düşük kontrast
+    scores["ic_mekan"] += (0.6 - abs(bright-0.55)) + (0.15 - contrast)
+
+    # Dağ: yüksek kontrast + düşük parlaklık eğilimi
+    scores["dag"] += (contrast*2.0) + (0.55 - bright)
+
+    # Cadde: orta kontrast + kırmızı/yeşil dengeli (nötr)
+    scores["cadde"] += (0.4 - abs((r+g+b)/3 - 0.45)) + (0.25 - abs(contrast-0.18))
+
+    # Tarihi yer: genelde sıcak tonlar (kırmızı + sarı)
+    scores["tarihi_yer"] += (r + g - b) * 1.5
+
+    # Normalize
+    vals = np.array(list(scores.values()), dtype=np.float32)
+    # softmax
+    exps = np.exp(vals - vals.max())
+    probs = exps / exps.sum()
+
+    prob_dict = {CLASSES[i]: float(probs[i]) for i in range(len(CLASSES))}
+    top = max(prob_dict, key=prob_dict.get)
+    return top, prob_dict
+
+demo = gr.Interface(
     fn=predict,
-    inputs=gr.Image(type="pil"),
-    outputs=gr.Label(),
-    title="Intel Image Classification",
-    description="Upload an image and classify it using a CNN model."
+    inputs=gr.Image(type="pil", label="Görsel Yükle"),
+    outputs=[
+        gr.Label(label="Tahmin (6 sınıf)"),
+        gr.JSON(label="Olasılıklar")
+    ],
+    title="6 Sınıflı Sahne Tanıma (Demo)",
+    description="Cadde / Deniz / Orman / Dağ / İç Mekan / Tarihi Yer için hızlı baseline demo (heuristic)."
 )
 
-interface.launch()
-
+if __name__ == "__main__":
+    demo.launch()
